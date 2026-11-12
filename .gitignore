@@ -1,0 +1,27 @@
+# Python virtual environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Hadoop installation
+hadoop-3.4.2/
+hadoop-3.4.2.tar.gz
+hadoop-3.4.2.tar.gz.1
+hadoop_data/
+
+# Dataset archive (keep extracted dataset)
+ml-latest-small.zip
+
+# IDE and OS files
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.*
+
+# Logs and temporary files
+*.log
+.ipynb_checkpoints/
