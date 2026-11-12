@@ -65,12 +65,12 @@ The project follows a straightforward data pipeline that matches the actual impl
 
 ```mermaid
 flowchart TD
-    A[MovieLens CSV Dataset<br/>ml-latest-small/] --> B[Hadoop HDFS<br/>Pseudo-distributed mode]
-    B --> C[Apache Spark / PySpark<br/>local[*]]
-    C --> D[Data Processing and Analytics<br/>Summary, Top Users, Top Movies, Genres, Rating Distribution]
-    D --> E[Processed CSV Outputs<br/>data/processed/...]
-    E --> F[Pandas]
-    F --> G[Streamlit + Plotly Dashboard<br/>dashboard/app.py]
+    A["MovieLens CSV Dataset<br/>ml-latest-small/"] --> B["Hadoop HDFS<br/>Pseudo-distributed mode"]
+    B --> C["Apache Spark / PySpark<br/>local[*]"]
+    C --> D["Data Processing and Analytics<br/>Summary, Top Users, Top Movies, Genres, Rating Distribution"]
+    D --> E["Processed CSV Outputs<br/>data/processed/..."]
+    E --> F["Pandas"]
+    F --> G["Streamlit + Plotly Dashboard<br/>dashboard/app.py"]
 ```
 
 ### Role of Each Component
