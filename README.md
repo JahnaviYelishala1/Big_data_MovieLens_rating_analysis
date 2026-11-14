@@ -120,7 +120,7 @@ flowchart LR
 
 #### Proposed Configuration Approach
 
-our three-node deployment, the system would be structured as follows:
+For a three-node deployment, the system would be structured as follows:
 
 - PC 1: Master node running Hadoop NameNode and Spark Master.
 - PC 2: Worker node 1 running Hadoop DataNode and Spark Worker.
@@ -137,6 +137,258 @@ Typical configuration tasks would include:
 7. Start HDFS and YARN or Spark cluster services.
 
 This is clearly labeled as a proposed extension and is not part of the current implementation.
+
+#### Three-PC Setup Instructions
+
+These steps describe a small cluster on three Ubuntu machines on the same trusted LAN. Run commands in the indicated place: **all PCs**, **PC 1 (master)**, or **PC 2/PC 3 (workers)**. Replace the example IP addresses and `YOUR_USER` with the actual LAN addresses and the same Linux account name on all three PCs. Reserve the addresses in your router or configure static addresses so the host mappings do not change.
+
+Example names used below:
+
+| PC | Hostname | Example IP | Services |
+|---|---|---|---|
+| PC 1 | `master` | `192.168.1.10` | HDFS NameNode, Spark Master |
+| PC 2 | `worker1` | `192.168.1.11` | HDFS DataNode, Spark Worker |
+| PC 3 | `worker2` | `192.168.1.12` | HDFS DataNode, Spark Worker |
+
+##### 1. Prepare all three PCs
+
+On **each PC**, install Java 17, SSH, Python and utilities, and set the machine's hostname to the matching name in the table (use `master`, `worker1`, or `worker2`):
+
+```bash
+sudo apt update
+sudo apt install -y openjdk-17-jdk openssh-server python3 python3-venv python3-pip wget
+sudo hostnamectl set-hostname master
+sudo systemctl enable --now ssh
+```
+
+Change the final command on PC 2 to `sudo hostnamectl set-hostname worker1` and on PC 3 to `sudo hostnamectl set-hostname worker2`. Log out and back in if the shell still displays the old hostname.
+
+On **each PC**, add the same host mappings. Substitute the actual addresses if they differ:
+
+```bash
+sudo tee -a /etc/hosts >/dev/null <<'EOF'
+192.168.1.10 master
+192.168.1.11 worker1
+192.168.1.12 worker2
+EOF
+
+getent hosts master worker1 worker2
+java -version
+```
+
+Confirm all three names resolve to the intended LAN addresses and that Java reports version 17.
+
+##### 2. Install Hadoop on all three PCs
+
+On **each PC**, download and unpack the same Hadoop version under the same account:
+
+```bash
+cd "$HOME"
+wget https://dlcdn.apache.org/hadoop/common/hadoop-3.4.2/hadoop-3.4.2.tar.gz
+tar -xzf hadoop-3.4.2.tar.gz
+```
+
+Add Hadoop and Java environment variables to `~/.bashrc` on **each PC**:
+
+```bash
+cat >> ~/.bashrc <<'EOF'
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+export HADOOP_HOME="$HOME/hadoop-3.4.2"
+export HADOOP_CONF_DIR="$HADOOP_HOME/etc/hadoop"
+export PATH="$PATH:$HADOOP_HOME/bin:$HADOOP_HOME/sbin"
+EOF
+source ~/.bashrc
+hadoop version
+```
+
+The paths and account must be usable by Hadoop on every PC. If your Java installation uses another path, find its JDK directory with:
+
+```bash
+dirname "$(dirname "$(readlink -f "$(which java)")")"
+```
+
+Set `JAVA_HOME` to the directory printed by that command.
+
+##### 3. Configure HDFS on PC 1 and copy the configuration
+
+On **PC 1**, replace `YOUR_USER` below with the common Linux username. These settings designate PC 1 as the NameNode and PCs 2 and 3 as DataNodes; replication is set to two copies:
+
+```bash
+cat > "$HADOOP_HOME/etc/hadoop/core-site.xml" <<'EOF'
+<configuration>
+    <property>
+        <name>fs.defaultFS</name>
+        <value>hdfs://master:9000</value>
+    </property>
+</configuration>
+EOF
+
+cat > "$HADOOP_HOME/etc/hadoop/hdfs-site.xml" <<'EOF'
+<configuration>
+    <property>
+        <name>dfs.replication</name>
+        <value>2</value>
+    </property>
+    <property>
+        <name>dfs.namenode.name.dir</name>
+        <value>file:///home/YOUR_USER/hadoop_data/namenode</value>
+    </property>
+    <property>
+        <name>dfs.datanode.data.dir</name>
+        <value>file:///home/YOUR_USER/hadoop_data/datanode</value>
+    </property>
+</configuration>
+EOF
+
+printf '%s\n' 'worker1' 'worker2' > "$HADOOP_HOME/etc/hadoop/workers"
+printf '\nexport JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64\n' \
+  >> "$HADOOP_HOME/etc/hadoop/hadoop-env.sh"
+```
+
+The NameNode and DataNode directories are local to the PC running each daemon; using the same path on all PCs is intentional. Create them on **each PC**, changing `YOUR_USER` as above:
+
+```bash
+mkdir -p "$HOME/hadoop_data/namenode" "$HOME/hadoop_data/datanode"
+```
+
+On **PC 1**, copy the shared Hadoop configuration to both workers:
+
+```bash
+scp "$HADOOP_HOME/etc/hadoop/core-site.xml" \
+    "$HADOOP_HOME/etc/hadoop/hdfs-site.xml" \
+    "$HADOOP_HOME/etc/hadoop/hadoop-env.sh" \
+    YOUR_USER@worker1:"$HOME/hadoop-3.4.2/etc/hadoop/"
+scp "$HADOOP_HOME/etc/hadoop/core-site.xml" \
+    "$HADOOP_HOME/etc/hadoop/hdfs-site.xml" \
+    "$HADOOP_HOME/etc/hadoop/hadoop-env.sh" \
+    YOUR_USER@worker2:"$HOME/hadoop-3.4.2/etc/hadoop/"
+scp "$HADOOP_HOME/etc/hadoop/workers" \
+    YOUR_USER@worker1:"$HOME/hadoop-3.4.2/etc/hadoop/"
+scp "$HADOOP_HOME/etc/hadoop/workers" \
+    YOUR_USER@worker2:"$HOME/hadoop-3.4.2/etc/hadoop/"
+```
+
+##### 4. Enable SSH from PC 1 to both workers
+
+On **PC 1**, generate an SSH key if one does not already exist, install its public key on both workers, and verify passwordless login. Enter each worker account password when `ssh-copy-id` requests it:
+
+```bash
+test -f ~/.ssh/id_ed25519 || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+ssh-copy-id YOUR_USER@worker1
+ssh-copy-id YOUR_USER@worker2
+ssh YOUR_USER@worker1 hostname
+ssh YOUR_USER@worker2 hostname
+```
+
+Hadoop's start/stop scripts use SSH to manage remote daemons. Ensure `sshd` is running on all PCs and the same account can write to its Hadoop data and log directories.
+
+##### 5. Start and check HDFS
+
+On **PC 1 only**, format the NameNode once for a brand-new cluster, then start HDFS:
+
+```bash
+hdfs namenode -format
+start-dfs.sh
+jps
+hdfs dfsadmin -report
+```
+
+Do **not** format the NameNode again after the cluster contains data; formatting replaces its filesystem metadata. `jps` on PC 1 should show a NameNode and DataNode, and on each worker a DataNode. The HDFS report should show two live DataNodes. The NameNode web page is `http://master:9870`.
+
+##### 6. Install and start Spark standalone
+
+Spark must be installed at the same path and version on all three PCs. Use a Spark distribution whose version matches the PySpark version used to submit the job. The following example matches the PySpark version listed in this README; if that release is unavailable from the Apache download mirror, choose an available Spark release and install the matching PySpark version on every machine.
+
+On **each PC**, download and unpack the same Spark distribution:
+
+```bash
+cd "$HOME"
+wget https://dlcdn.apache.org/spark/spark-4.3.0/spark-4.3.0-bin-hadoop3.tgz
+tar -xzf spark-4.3.0-bin-hadoop3.tgz
+```
+
+Add Spark and Python settings to `~/.bashrc` on **each PC**. Use the actual project path on each machine; this example assumes the project and virtual environment exist under `$HOME/MovieLensProject`:
+
+```bash
+cat >> ~/.bashrc <<'EOF'
+export SPARK_HOME="$HOME/spark-4.3.0-bin-hadoop3"
+export PATH="$PATH:$SPARK_HOME/bin:$SPARK_HOME/sbin"
+export PYSPARK_PYTHON="$HOME/MovieLensProject/.venv/bin/python"
+export HADOOP_CONF_DIR="$HOME/hadoop-3.4.2/etc/hadoop"
+EOF
+source ~/.bashrc
+```
+
+Create the project virtual environment and install PySpark on **each PC** (copy or clone the project to the same path on all three first):
+
+```bash
+cd "$HOME/MovieLensProject"
+python3 -m venv .venv
+source .venv/bin/activate
+pip install pyspark==4.3.0
+```
+
+On **PC 1**, also install the dashboard dependencies in the same environment:
+
+```bash
+source "$HOME/MovieLensProject/.venv/bin/activate"
+pip install streamlit plotly pandas
+```
+
+On **PC 1**, start the Spark Master:
+
+```bash
+start-master.sh --host master --port 7077 --webui-port 8080
+```
+
+On **PC 2**, start its Spark Worker:
+
+```bash
+start-worker.sh spark://master:7077
+```
+
+Run the same `start-worker.sh` command on **PC 3**. Check the Spark Master UI at `http://master:8080`; it should list two workers. Start the master and workers after each reboot, or configure them as managed services for a persistent deployment. To stop the daemons, run `stop-worker.sh` on each worker and `stop-master.sh` on PC 1; stop HDFS from PC 1 with `stop-dfs.sh`.
+
+##### 7. Network and firewall checks
+
+All PCs must be able to reach one another over the LAN. HDFS uses NameNode RPC/web ports 9000/9870 and DataNode ports 9864, 9866 and 9867; Spark uses Master RPC/web ports 7077/8080 and worker/executor ports. Spark worker/executor ports can be dynamic, so a restrictive firewall also needs fixed Spark port configuration and matching rules. For a trusted, isolated LAN only, a simple UFW rule is to allow traffic from the cluster subnet on **each PC** (replace the example subnet if needed):
+
+```bash
+sudo ufw allow from 192.168.1.0/24
+sudo ufw status
+```
+
+This allows all ports from that subnet; do not use it on an untrusted network or expose cluster services to the public internet.
+
+##### 8. Copy the dataset and run the analytics
+
+Run these commands on **PC 1**, from the repository root, after HDFS and Spark are running:
+
+```bash
+cd "$HOME/MovieLensProject"
+hdfs dfs -mkdir -p /movielens
+hdfs dfs -put -f ml-latest-small/ratings.csv /movielens/
+hdfs dfs -put -f ml-latest-small/movies.csv /movielens/
+hdfs dfs -ls /movielens
+```
+
+Before submitting, update `src/ratings_analysis.py` for cluster execution: replace `.master("local[*]")` with the master URL `spark://master:7077`, replace its `hdfs://localhost:9000/...` input URIs with `hdfs://master:9000/...`, and write the outputs to a shared destination such as HDFS if they must be read by the dashboard on PC 1. The current script is explicitly configured for one machine: it hard-codes local Spark mode, uses `localhost` for HDFS, and writes output to a local path. Infrastructure setup alone does not make that script distributed.
+
+After adapting the script and ensuring its output location is accessible to the dashboard, submit it from **PC 1**:
+
+```bash
+cd "$HOME/MovieLensProject"
+source .venv/bin/activate
+spark-submit --master spark://master:7077 --deploy-mode client src/ratings_analysis.py
+```
+
+The driver runs on PC 1 in client mode. Keep the project, Python environment, and any local dashboard output path available there. For a dashboard on PC 1, start it there after the analytics job completes:
+
+```bash
+streamlit run dashboard/app.py
+```
+
+Review the Spark Master UI and the application output for execution status. This setup section is a deployment guide, not a claim that the three-PC cluster has been run or tested for this repository.
 
 ---
 
