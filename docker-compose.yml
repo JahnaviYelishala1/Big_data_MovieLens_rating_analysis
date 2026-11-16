@@ -1,0 +1,136 @@
+services:
+  master:
+    container_name: master
+    hostname: master
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["bash", "/opt/scripts/master-entrypoint.sh"]
+    working_dir: /workspace
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+      HADOOP_HOME: /opt/hadoop
+      HADOOP_CONF_DIR: /opt/hadoop/etc/hadoop
+      SPARK_HOME: /opt/spark
+      SPARK_MASTER_HOST: master
+      SPARK_MASTER_PORT: "7077"
+      SPARK_MASTER_WEBUI_PORT: "8080"
+      SPARK_DAEMON_MEMORY: 256m
+      HADOOP_NAMENODE_OPTS: -Xmx512m
+      PATH: /usr/lib/jvm/java-17-openjdk-amd64/bin:/opt/hadoop/bin:/opt/hadoop/sbin:/opt/spark/bin:/opt/spark/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    ports:
+      - "9000:9000"
+      - "9870:9870"
+      - "7077:7077"
+      - "8080:8080"
+    volumes:
+      - namenode-data:/hadoop/dfs/name
+      - ./config/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./config/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - ./config/workers:/opt/hadoop/etc/hadoop/workers:ro
+      - ./docker/master-entrypoint.sh:/opt/scripts/master-entrypoint.sh:ro
+      - ./src:/workspace/src:ro
+      - ./ml-latest-small:/workspace/ml-latest-small:ro
+      - ./data/processed:/workspace/data/processed
+    networks:
+      - hadoop-spark-net
+    mem_limit: 2g
+    cpus: 1.5
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z master 9000 && nc -z localhost 9870 && nc -z master 7077 && nc -z localhost 8080 && hdfs dfsadmin -report >/dev/null 2>&1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  worker1:
+    container_name: worker1
+    hostname: worker1
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["bash", "/opt/scripts/worker-entrypoint.sh"]
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+      HADOOP_HOME: /opt/hadoop
+      HADOOP_CONF_DIR: /opt/hadoop/etc/hadoop
+      SPARK_HOME: /opt/spark
+      SPARK_WORKER_CORES: "1"
+      SPARK_WORKER_MEMORY: 768m
+      SPARK_WORKER_WEBUI_PORT: "8081"
+      SPARK_DAEMON_MEMORY: 256m
+      HADOOP_DATANODE_OPTS: -Xmx384m
+      PATH: /usr/lib/jvm/java-17-openjdk-amd64/bin:/opt/hadoop/bin:/opt/hadoop/sbin:/opt/spark/bin:/opt/spark/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    volumes:
+      - datanode1-data:/hadoop/dfs/data
+      - ./config/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./config/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - ./config/workers:/opt/hadoop/etc/hadoop/workers:ro
+      - ./docker/worker-entrypoint.sh:/opt/scripts/worker-entrypoint.sh:ro
+    networks:
+      - hadoop-spark-net
+    ports:
+      - "8081:8081"
+    depends_on:
+      master:
+        condition: service_healthy
+    mem_limit: 2g
+    cpus: 1.0
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "hdfs dfsadmin -report 2>/dev/null | grep -F \"Hostname: $$(hostname)\" >/dev/null && nc -z localhost 9866 && nc -z localhost 8081"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+
+  worker2:
+    container_name: worker2
+    hostname: worker2
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["bash", "/opt/scripts/worker-entrypoint.sh"]
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+      HADOOP_HOME: /opt/hadoop
+      HADOOP_CONF_DIR: /opt/hadoop/etc/hadoop
+      SPARK_HOME: /opt/spark
+      SPARK_WORKER_CORES: "1"
+      SPARK_WORKER_MEMORY: 768m
+      SPARK_WORKER_WEBUI_PORT: "8081"
+      SPARK_DAEMON_MEMORY: 256m
+      HADOOP_DATANODE_OPTS: -Xmx384m
+      PATH: /usr/lib/jvm/java-17-openjdk-amd64/bin:/opt/hadoop/bin:/opt/hadoop/sbin:/opt/spark/bin:/opt/spark/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    volumes:
+      - datanode2-data:/hadoop/dfs/data
+      - ./config/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./config/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - ./config/workers:/opt/hadoop/etc/hadoop/workers:ro
+      - ./docker/worker-entrypoint.sh:/opt/scripts/worker-entrypoint.sh:ro
+    networks:
+      - hadoop-spark-net
+    ports:
+      - "8082:8081"
+    depends_on:
+      master:
+        condition: service_healthy
+    mem_limit: 2g
+    cpus: 1.0
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "hdfs dfsadmin -report 2>/dev/null | grep -F \"Hostname: $$(hostname)\" >/dev/null && nc -z localhost 9866 && nc -z localhost 8081"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+
+volumes:
+  namenode-data:
+  datanode1-data:
+  datanode2-data:
+
+networks:
+  hadoop-spark-net:
+    driver: bridge

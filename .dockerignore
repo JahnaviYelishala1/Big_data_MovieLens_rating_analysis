@@ -1,0 +1,16 @@
+.venv/
+venv/
+.git/
+**/__pycache__/
+**/*.pyc
+**/logs/
+hadoop-3.4.2/
+hadoop-3.4.2.tar.gz
+hadoop-3.4.2.tar.gz.1
+ml-latest-small.zip
+hadoop_data/
+**/*.log
+**/*.out
+.vscode/
+.idea/
+.DS_Store
