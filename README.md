@@ -1,335 +1,505 @@
-# MovieLens Big Data Analytics with Dockerized Hadoop + Spark
+# MovieLens Movie Rating Analysis using Hadoop, Apache Spark, Docker, and Streamlit
 
-This repository preserves the existing MovieLens analytics workflow and extends it with a Docker-based three-node Hadoop and Apache Spark cluster. The project keeps the current Streamlit dashboard, processed outputs, and raw dataset while adding a containerized distributed environment for HDFS and Spark.
+This project uses MovieLens rating and movie metadata to demonstrate distributed storage with Hadoop HDFS, distributed analytics with Apache Spark, and interactive reporting with Streamlit. The Docker Compose setup runs a three-container Hadoop and Spark cluster on one Docker host; the containers simulate cluster nodes and are not separate physical computers.
 
-## Project goals
+## Table of Contents
 
-- Keep the existing analytics logic and dashboard working without rebuilding the application from scratch.
-- Run a three-container Hadoop and Spark cluster locally on one laptop through Docker Compose.
-- Use a reusable image for all nodes with role-specific startup scripts.
-- Keep HDFS metadata and DataNode storage persistent across container restarts.
-- Provide a simple path to run the MovieLens analytics job against HDFS and visualize results with Streamlit.
+- [Project Overview](#project-overview)
+- [Key Features](#key-features)
+- [System Architecture](#system-architecture)
+- [Technology Stack](#technology-stack)
+- [Dataset](#dataset)
+- [Project Directory Structure](#project-directory-structure)
+- [Hadoop HDFS Configuration](#hadoop-hdfs-configuration)
+- [Docker-Based Cluster Setup](#docker-based-cluster-setup)
+- [Running the Analytics](#running-the-analytics)
+- [Analytics Results](#analytics-results)
+- [Streamlit Dashboard](#streamlit-dashboard)
+- [HDFS Replication and Verification](#hdfs-replication-and-verification)
+- [Spark Cluster Verification](#spark-cluster-verification)
+- [Troubleshooting](#troubleshooting)
+- [Limitations and Future Enhancements](#limitations-and-future-enhancements)
+- [Learning Outcomes](#learning-outcomes)
 
-## Current implementation
+## Project Overview
 
-The repository now contains:
+Movie rating data can be analyzed to understand rating patterns, user activity, movie popularity, and genre-level trends. This project uses the MovieLens Latest Small dataset to demonstrate a data workflow in which CSV input files are stored in HDFS, Spark computes aggregate statistics, and the resulting CSV datasets are displayed by a Streamlit dashboard.
 
-- a three-node Docker Compose cluster named `master`, `worker1`, and `worker2`
-- Hadoop HDFS configured for a NameNode + two DataNodes
-- Apache Spark configured with a master on `master` and workers on `worker1` and `worker2`
-- a reusable Docker image based on Python 3.12 and Java 17
-- persistent Docker volumes for NameNode and DataNode storage
-- a dedicated bridge network for internal cluster communication
+The application has two Spark execution modes:
 
-## Architecture
+- **Cluster mode** submits the PySpark job to the Spark standalone Master and its two Workers. It reads and writes data in HDFS, then copies the output datasets to the host's `data/processed/` directory for the dashboard.
+- **Local mode** runs Spark with `local[*]` on the machine executing the Python process. It still reads input from HDFS, using `localhost:9000`, and writes output to a local directory. Local mode does not distribute work to the Docker Spark Workers.
 
-The cluster is a simulated three-node environment running in Docker on a single physical machine. This is not three physical PCs; it is a multi-container distributed topology created inside one host environment.
+The recommended end-to-end workflow is Docker cluster mode.
 
-```text
-+-------------------------------+
-| Docker Host / WSL2 Ubuntu     |
-|                               |
-|  master                       |
-|  - HDFS NameNode              |
-|  - Spark Master               |
-|  - PySpark job submission     |
-|  + ports: 9000, 9870, 7077, 8080 |
-|                               |
-|  worker1                      |
-|  - HDFS DataNode              |
-|  - Spark Worker               |
-|                               |
-|  worker2                      |
-|  - HDFS DataNode              |
-|  - Spark Worker               |
-+-------------------------------+
+## Key Features
+
+- Stores the input CSVs and analytics outputs in Hadoop HDFS.
+- Runs one NameNode and two DataNodes.
+- Runs an Apache Spark standalone Master and two Spark Workers.
+- Uses Spark SQL/DataFrame transformations for rating and movie analytics.
+- Writes five CSV outputs: `summary`, `top_users`, `top_movies`, `genre_stats`, and `rating_distribution`.
+- Copies cluster-mode outputs from HDFS into `data/processed/` for the dashboard.
+- Displays analytics with Streamlit, Pandas, and Plotly.
+- Deploys the Hadoop and Spark services with Docker Compose.
+- Configures HDFS replication factor 2 across the two DataNodes. This provides a second block replica while both DataNodes are available; it is not protection against loss of the entire Docker host or both volumes.
+
+## System Architecture
+
+The Compose services are named `master`, `worker1`, and `worker2` on a private bridge network. Streamlit runs separately on the Docker host and reads local CSV outputs.
+
+```mermaid
+flowchart LR
+    dataset["MovieLens dataset<br/>ratings.csv and movies.csv"]
+    hdfs["HDFS<br/>/movielens"]
+    master["master container<br/>NameNode and Spark Master"]
+    worker1["worker1 container<br/>DataNode and Spark Worker"]
+    worker2["worker2 container<br/>DataNode and Spark Worker"]
+    hdfsout["HDFS processed datasets<br/>/movielens/processed"]
+    localout["Host CSV results<br/>data/processed/"]
+    dashboard["Streamlit dashboard<br/>Docker host"]
+
+    dataset -->|uploaded to| hdfs
+    hdfs -->|HDFS location used by the job| master
+    master -->|schedules Spark tasks| worker1
+    master -->|schedules Spark tasks| worker2
+    hdfs -->|workers read input blocks| worker1
+    hdfs -->|workers read input blocks| worker2
+    worker1 -->|write analytics outputs| hdfsout
+    worker2 -->|write analytics outputs| hdfsout
+    hdfsout -->|cluster job syncs CSVs| localout
+    localout -->|reads part-*.csv files| dashboard
 ```
 
-Container-to-container communication uses the Docker Compose service names:
+The Spark Master schedules work; it is not itself a Spark Worker. Spark tasks on the Workers read input files from HDFS and write the analytics outputs back to HDFS. In cluster mode, the application synchronizes those HDFS outputs to the host-mounted `data/processed/` directory.
 
-- `master`
-- `worker1`
-- `worker2`
+| Component | Responsibilities |
+|---|---|
+| `master` | Runs the HDFS NameNode and Spark Master; provides the HDFS and Spark web UIs and accepts job submissions. |
+| `worker1` | Runs a DataNode and a Spark Worker. |
+| `worker2` | Runs a DataNode and a Spark Worker. |
+| HDFS | Stores the input CSVs and Spark output directories, with replication factor 2. |
+| Spark standalone cluster | Schedules and executes the analytics job on the two configured Workers. |
+| Streamlit | Reads the processed CSV files and local MovieLens data to render charts, tables, and KPI cards. |
 
-The HDFS default filesystem is configured as:
+These are three Docker containers on one machine. They demonstrate a multi-node service topology, not a deployment across three physical computers.
 
-- `hdfs://master:9000`
+## Technology Stack
 
-The Spark master URL is configured as:
+| Technology | Version or configuration | Where it is defined |
+|---|---|---|
+| Hadoop / HDFS | Hadoop 3.4.2 | `docker/Dockerfile` |
+| Apache Spark | Spark 4.3.0, Hadoop 3 build | `docker/Dockerfile` |
+| Java | OpenJDK 17 | `docker/Dockerfile` and Compose environment |
+| Python | Python 3.12, `slim-bookworm` base image | `docker/Dockerfile` |
+| PySpark | Spark's bundled PySpark runtime in the container; the analytics script imports PySpark | `docker/Dockerfile`, `src/ratings_analysis.py` |
+| Docker Compose | Compose specification; the Compose CLI version is not pinned in this repository | `docker-compose.yml` |
+| Streamlit | Declared in `requirements.txt`; version is not pinned | `requirements.txt` |
+| Pandas | Declared in `requirements.txt`; version is not pinned | `requirements.txt`, `dashboard/app.py` |
+| Plotly Express | Provided by the `plotly` dependency in `requirements.txt`; version is not pinned | `requirements.txt`, `dashboard/app.py` |
 
-- `spark://master:7077`
+The container image installs Java, Hadoop, and Spark. The root `requirements.txt` contains the dashboard dependencies (`streamlit`, `pandas`, and `plotly`); it does not install PySpark for a host-based local analytics run.
 
-## Files in this repo
+## Dataset
+
+The repository includes the MovieLens **Latest Small** dataset under `ml-latest-small/`. Its included `README.txt` identifies this development dataset as generated on September 26, 2018. It contains:
+
+| File | Rows, excluding the header | Columns |
+|---|---:|---|
+| `ratings.csv` | 100,836 | `userId`, `movieId`, `rating`, `timestamp` |
+| `movies.csv` | 9,742 | `movieId`, `title`, `genres` |
+| `tags.csv` | 3,683 | `userId`, `movieId`, `tag`, `timestamp` |
+| `links.csv` | 9,742 | `movieId`, `imdbId`, `tmdbId` |
+
+The dataset README reports 610 users. The analytics job uses `ratings.csv` and `movies.csv`; it does not currently analyze `tags.csv` or `links.csv`. Movie genres are pipe-delimited in `movies.csv`. The supplied dataset documentation contains its license and citation information.
+
+## Project Directory Structure
+
+The following tree shows the source and runtime data used by the project. Part-file names are generated by Spark and can vary between runs.
 
 ```text
 MovieLensProject/
-├── dashboard/
-│   └── app.py
-├── src/
-│   └── ratings_analysis.py
-├── data/
-│   └── processed/
-├── ml-latest-small/
 ├── config/
 │   ├── core-site.xml
 │   ├── hdfs-site.xml
 │   └── workers
+├── dashboard/
+│   └── app.py
+├── data/
+│   └── processed/
+│       ├── genre_stats/
+│       ├── rating_distribution/
+│       ├── summary/
+│       ├── top_movies/
+│       └── top_users/
 ├── docker/
 │   ├── Dockerfile
 │   ├── master-entrypoint.sh
 │   └── worker-entrypoint.sh
+├── ml-latest-small/
+│   ├── README.txt
+│   ├── links.csv
+│   ├── movies.csv
+│   ├── ratings.csv
+│   └── tags.csv
+├── src/
+│   └── ratings_analysis.py
+├── .dockerignore
+├── .gitignore
 ├── docker-compose.yml
-├── requirements.txt
 ├── README.md
-├── .venv/
-├── hadoop-3.4.2/
-├── ml-latest-small.zip
-└── .gitignore
+└── requirements.txt
 ```
 
-## Existing project components preserved
+The `.venv/`, `.git/`, local Hadoop installation files and archives, and the dataset ZIP archive are omitted from this tree. They are not required by the Compose workflow; the Dockerfile downloads Hadoop and Spark into the image, and the extracted dataset is already present in the repository.
 
-The project continues to use:
+## Hadoop HDFS Configuration
 
-- the existing MovieLens raw dataset in `ml-latest-small/`
-- the existing Spark ETL and analytics job in `src/ratings_analysis.py`
-- the existing Streamlit dashboard in `dashboard/app.py`
-- the existing processed analytics CSV outputs in `data/processed/`
+### Services and configuration files
 
-The repo keeps these files intact and adds Docker infrastructure around them without replacing the original application logic.
+- The NameNode manages the HDFS namespace and block metadata. It runs in `master`.
+- Each DataNode stores HDFS blocks. They run in `worker1` and `worker2`.
+- [`config/core-site.xml`](config/core-site.xml) sets `fs.defaultFS` to `hdfs://master:9000` and sets Hadoop's temporary directory to `/tmp/hadoop`.
+- [`config/hdfs-site.xml`](config/hdfs-site.xml) sets the replication factor to 2, the NameNode and DataNode storage directories, the NameNode RPC address, and the NameNode/DataNode service addresses.
+- [`config/workers`](config/workers) lists `worker1` and `worker2`.
 
-## Requirements and versions
+The configured service ports are:
 
-The implementation is aligned to the following versions and compatibility assumptions:
+| Service | Port | Purpose |
+|---|---:|---|
+| NameNode RPC | 9000 | HDFS client and DataNode RPC access |
+| NameNode HTTP | 9870 | NameNode web UI |
+| DataNode transfer | 9866 | HDFS block transfer, internal to the Compose network |
+| DataNode HTTP | 9864 | DataNode HTTP service, internal to the Compose network |
+| DataNode IPC | 9867 | DataNode IPC, internal to the Compose network |
 
-- Java 17
-- Hadoop 3.4.2
-- Apache Spark 4.3.0
-- Python 3.12
-- Docker Desktop + WSL2 on Windows
+`docker-compose.yml` publishes NameNode RPC port 9000 and NameNode UI port 9870 on the host. DataNode ports are not published to the host; the cluster services communicate over the Compose network.
 
-Important note:
+The Compose file defines named volumes `namenode-data`, `datanode1-data`, and `datanode2-data`. These keep HDFS metadata and block storage when containers are recreated. The master entrypoint formats a fresh, empty NameNode volume once. If it finds existing `current/VERSION` metadata, it leaves it unchanged; if it finds a non-empty directory without that metadata, it refuses to format.
 
-- Spark 4.3.0 is used in the container image.
-- Hadoop 3.4.2 is the HDFS runtime version used for the cluster.
-- Java 17 is the required JDK for both Hadoop and Spark.
-- The Streamlit dashboard reads the processed CSV files and does not need Hadoop or Spark libraries installed in the dashboard environment.
+### Upload the input files to HDFS
 
-## Dashboard dependency configuration
-
-The dashboard requirements in `requirements.txt` include the packages used by the UI:
-
-- `streamlit`
-- `pandas`
-- `plotly`
-
-Additional third-party packages are not added unless they are directly imported by the dashboard code. This keeps the dashboard environment lightweight and reproducible while leaving cluster-specific runtime dependencies to the Docker image.
-
-## Docker Desktop on Windows + WSL2
-
-Docker is not installed in the current environment. On a Windows laptop, use Docker Desktop for Windows with WSL2 integration.
-
-### 1. Check WSL2 status
-
-Open PowerShell as Administrator:
-
-```powershell
-wsl --status
-wsl -l -v
-```
-
-### 2. Check the Ubuntu distribution
-
-From the Ubuntu terminal:
+Start the Compose services first, then create the HDFS input directory and copy the two files used by the analytics job. The dataset directory is mounted read-only in the master container at `/workspace/ml-latest-small`.
 
 ```bash
-cat /etc/os-release
+# Create the input directory in HDFS.
+docker compose exec master hdfs dfs -mkdir -p /movielens
+
+# Copy the analytics input files from the mounted dataset into HDFS.
+# -f replaces these HDFS destination files if they already exist.
+docker compose exec master hdfs dfs -put -f \
+  /workspace/ml-latest-small/ratings.csv \
+  /workspace/ml-latest-small/movies.csv \
+  /movielens/
+
+# Confirm that both inputs are present.
+docker compose exec master hdfs dfs -ls /movielens
 ```
 
-### 3. Install Docker Desktop
+The job reads `/movielens/ratings.csv` and `/movielens/movies.csv` in HDFS.
 
-Download the official installer from:
+## Docker-Based Cluster Setup
 
-https://www.docker.com/products/docker-desktop/
+### Prerequisites
 
-Then install Docker Desktop for Windows and complete the setup wizard.
+- Git.
+- Docker Engine or Docker Desktop with the Docker Compose v2 plugin (`docker compose`).
+- Network access on the first image build so Docker can retrieve the configured Hadoop and Spark distributions.
+- The host ports listed below must be available.
 
-### 4. Enable WSL 2 based engine
+The MovieLens dataset is already included; a separate dataset download is not required.
 
-In Docker Desktop:
-
-- Settings > General
-- Enable `Use the WSL 2 based engine`
-
-### 5. Enable Ubuntu integration
-
-In Docker Desktop:
-
-- Settings > Resources > WSL Integration
-- Enable the Ubuntu distribution used by your project
-
-### 6. Restart Docker Desktop and WSL
-
-If Docker is not responding:
-
-- close Docker Desktop
-- reopen it
-- restart the Ubuntu WSL session if needed
-
-### 7. Verify Docker from Ubuntu terminal
+### Clone and start the cluster
 
 ```bash
-docker --version
-docker compose version
-docker run hello-world
+# Clone the repository into the expected project directory.
+git clone https://github.com/JahnaviYelishala1/Big_data_MovieLens_rating_analysis.git MovieLensProject
+cd MovieLensProject
+
+# Build the Compose images.
+docker compose build
+
+# Start the cluster. Workers wait for the master health check to pass.
+docker compose up -d
+
+# Show service state and health.
+docker compose ps -a
 ```
 
-If these commands work, Docker Desktop is ready for the cluster.
+The first build downloads and installs the image's Java, Hadoop, and Spark dependencies and can take several minutes. Later starts can use the built images with `docker compose up -d`.
 
-## Starting the three-node cluster
-
-From the repo root:
+To inspect startup output:
 
 ```bash
-docker compose up --build -d
+docker compose logs --tail=100 master worker1 worker2
 ```
 
-Verify all services are running:
+Wait until `master`, `worker1`, and `worker2` report healthy before submitting a cluster job. Both workers have `depends_on: master` with `condition: service_healthy`; each worker entrypoint also waits for the NameNode and Spark Master ports before starting its daemons.
 
-```bash
-docker compose ps
-```
+### Services, resource limits, and host ports
 
-Service endpoints:
+| Compose service | Hadoop/Spark processes | Compose resource limit | Host port mapping |
+|---|---|---|---|
+| `master` | NameNode and Spark Master | 2 GiB memory, 1.5 CPUs | `9000:9000` NameNode RPC; `9870:9870` NameNode UI; `7077:7077` Spark RPC; `8080:8080` Spark Master UI |
+| `worker1` | DataNode and Spark Worker | 2 GiB memory, 1 CPU; Spark Worker is configured for 1 core and 768 MiB | `8081:8081` Spark Worker UI |
+| `worker2` | DataNode and Spark Worker | 2 GiB memory, 1 CPU; Spark Worker is configured for 1 core and 768 MiB | `8082:8081` host-to-container Spark Worker UI |
 
-- HDFS NameNode: http://localhost:9870
-- Spark Master UI: http://localhost:8080
-- HDFS RPC: hdfs://master:9000
-- Spark Master: spark://master:7077
+The Spark daemon memory settings in Compose are 256 MiB. The NameNode JVM option is configured as `-Xmx512m`. These are process settings in addition to the Compose container limits.
 
-## Cluster startup behavior
+Open the UIs from the Docker host:
 
-The startup scripts are designed to:
+- Hadoop NameNode: [http://localhost:9870](http://localhost:9870)
+- Spark Master: [http://localhost:8080](http://localhost:8080)
+- Worker 1 Spark UI: [http://localhost:8081](http://localhost:8081)
+- Worker 2 Spark UI: [http://localhost:8082](http://localhost:8082)
 
-- format the NameNode only the first time a fresh volume is created
-- avoid reformatting the NameNode on every restart
-- wait for the NameNode to become ready before starting the DataNodes
-- start the HDFS DataNodes and Spark workers on `worker1` and `worker2`
-- keep HDFS and Spark services running in the foreground so the container remains alive
+The HDFS and Spark RPC addresses used between containers are `hdfs://master:9000` and `spark://master:7077`. `localhost` on a worker container refers to that worker, not to the master.
 
-## HDFS configuration summary
-
-`config/core-site.xml`
-
-```xml
-<configuration>
-    <property>
-        <name>fs.defaultFS</name>
-        <value>hdfs://master:9000</value>
-    </property>
-</configuration>
-```
-
-`config/hdfs-site.xml`
-
-```xml
-<configuration>
-    <property>
-        <name>dfs.replication</name>
-        <value>2</value>
-    </property>
-    <property>
-        <name>dfs.namenode.name.dir</name>
-        <value>/hadoop/dfs/name</value>
-    </property>
-    <property>
-        <name>dfs.datanode.data.dir</name>
-        <value>/hadoop/dfs/data</value>
-    </property>
-</configuration>
-```
-
-## Spark configuration summary
-
-The cluster is configured with:
-
-- Spark Master URL: `spark://master:7077`
-- Spark Master UI: `http://localhost:8080`
-- two Spark workers:
-  - `worker1`
-  - `worker2`
-
-## Running the analytics job
-
-After the Docker cluster is up, the project can still use the existing Spark analytics script in `src/ratings_analysis.py` with the cluster endpoints.
-
-From the repository root:
-
-```bash
-cd /home/jahnavi/MovieLensProject
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-If you want to submit the analytics job from the cluster environment, use the containerized Python runtime or any environment that has the project dependencies installed. The existing analytics script reads the raw data from HDFS and exports processed files to the local `data/processed` directory as the project already expects.
-
-## Streamlit dashboard
-
-Start the dashboard from the repository root:
-
-```bash
-streamlit run dashboard/app.py
-```
-
-The dashboard reads processed analytics files from `data/processed/` and displays:
-
-- KPI cards for total ratings, movies, users, and average rating
-- genre comparison charts
-- rating distribution charts
-- top movies filtered by minimum rating count
-- top active users
-
-## Data pipeline
-
-The overall pipeline continues to work as follows:
-
-1. The MovieLens raw files are loaded.
-2. The PySpark analysis job computes ratings and movie statistics.
-3. Results are exported as CSV files.
-4. The Streamlit dashboard reads those CSV outputs.
-
-This is the same business logic as the original project, with the infrastructure upgraded to a containerized Hadoop + Spark cluster.
-
-## Useful commands
-
-Check cluster health:
-
-```bash
-docker compose ps
-docker logs master
-docker logs worker1
-docker logs worker2
-```
-
-Stop the cluster:
+Stop the containers while retaining their named HDFS volumes with:
 
 ```bash
 docker compose down
 ```
 
-Optional: remove persistent data volumes if you want a fresh state:
+## Running the Analytics
+
+### Cluster mode (recommended)
+
+1. Start the Docker cluster and wait for all services to become healthy.
+2. Upload `ratings.csv` and `movies.csv` to HDFS using the commands in [Hadoop HDFS Configuration](#hadoop-hdfs-configuration).
+3. Submit the application to the Spark standalone cluster:
 
 ```bash
-docker volume rm movielensproject_namenode-data movielensproject_datanode1-data movielensproject_datanode2-data
+docker compose exec \
+  -e MOVIELENS_EXECUTION_MODE=cluster \
+  -e MOVIELENS_OVERWRITE=true \
+  master \
+  spark-submit --master spark://master:7077 \
+  /workspace/src/ratings_analysis.py
 ```
 
-Warning: removing Docker volumes destroys HDFS metadata and DataNode state. Only do this when you intentionally want to reset the cluster.
+`MOVIELENS_EXECUTION_MODE=cluster` selects the `spark://master:7077` execution mode. `MOVIELENS_OVERWRITE=true` explicitly allows the job to replace existing output directories; omit it for a first run when the output paths do not already exist. By default, the job refuses to overwrite existing HDFS or local output data.
 
-## Notes
+In cluster mode, the application:
 
-- The Docker setup is designed to be reproducible and safe for local development.
-- It keeps the original project code, data, and dashboard intact.
-- It does not force a rebuild of the application from scratch.
-- It does not delete persistent cluster data unless explicitly requested.
+1. Reads `hdfs://master:9000/movielens/ratings.csv` and `hdfs://master:9000/movielens/movies.csv`.
+2. Runs Spark transformations on the standalone cluster.
+3. Writes output datasets under `hdfs://master:9000/movielens/processed/`.
+4. By default (`MOVIELENS_SYNC_OUTPUTS=true`), downloads each output directory into `/workspace/data/processed/`. That path is a Compose bind mount of the host's `data/processed/` directory, which the Streamlit app reads.
 
+Set `MOVIELENS_SYNC_OUTPUTS=false` if the cluster job should leave results in HDFS without copying them to the host. To intentionally replace existing results, the overwrite flag must be set to the string `true`.
+
+### Local Spark mode
+
+Local mode runs Spark with `local[*]` on the machine running the Python process. It still expects the input files in HDFS at `hdfs://localhost:9000/movielens`; it does not use either Docker Spark Worker. The Compose master publishes port 9000 on the host, so the Docker cluster must be running and the HDFS input files must already be uploaded.
+
+The host needs Java 17 and a PySpark installation compatible with Spark 4.3.0. The project's `requirements.txt` installs dashboard packages only; install PySpark separately for this mode. The script's local output path is hard-coded as `~/MovieLensProject/data/processed`, so keep the checkout at `~/MovieLensProject` for these commands to put results in the dashboard's expected directory.
+
+```bash
+cd ~/MovieLensProject
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install pyspark==4.3.0
+
+# Run locally using all available local Spark cores.
+MOVIELENS_EXECUTION_MODE=local python src/ratings_analysis.py
+```
+
+For intentional replacement of existing local results, run:
+
+```bash
+MOVIELENS_EXECUTION_MODE=local MOVIELENS_OVERWRITE=true \
+  python src/ratings_analysis.py
+```
+
+Local mode writes directly to `~/MovieLensProject/data/processed/`; it does not write the results to HDFS or perform the cluster-to-host sync. The dashboard can read these local outputs from the same directory.
+
+### Analytics performed
+
+The application in [`src/ratings_analysis.py`](src/ratings_analysis.py) reads CSV files with headers and infers their schemas. It computes:
+
+- **Overall summary:** the average value of `rating`.
+- **Most active users:** count of ratings grouped by `userId`, sorted descending; the output contains the top 10.
+- **Highest-rated movies:** inner join of ratings and movies by `movieId`, then average rating and rating count per movie. Movies with fewer than **50 ratings** are excluded; the output contains up to 100 movies ordered by average rating descending.
+- **Genre statistics:** splits the pipe-delimited `genres` column into individual genres, excludes `(no genres listed)`, and computes average rating and rating count per genre.
+- **Rating distribution:** count of ratings for each rating value, ordered ascending.
+
+Each output is written as a CSV with a header. The Spark writer coalesces each result to one `part-*.csv` file and also creates a `_SUCCESS` marker in its output directory.
+
+## Analytics Results
+
+The five result directories are:
+
+| Output | CSV columns | Meaning |
+|---|---|---|
+| `summary` | `average_rating` | Overall mean rating. |
+| `top_users` | `userId`, `total_ratings` | Ten users with the largest rating counts. |
+| `top_movies` | `movieId`, `title`, `avg_rating`, `rating_count` | Up to 100 highest average-rated movies after the minimum 50-rating filter. |
+| `genre_stats` | `genre`, `avg_rating`, `rating_count` | Per-genre mean rating and rating count. |
+| `rating_distribution` | `rating`, `total_ratings` | Count of ratings at each rating value. |
+
+Cluster-mode HDFS paths are `/movielens/processed/<output-name>/`. After the default synchronization, the local layout is `data/processed/<output-name>/part-*.csv`. The dashboard loads all `part-*.csv` files it finds in each output directory.
+
+The currently generated results provide these examples:
+
+- Overall average rating: **3.5015569836**.
+- The most active user in the output is user ID `414` with **2,698** ratings.
+- The first movie in the output is `Shawshank Redemption, The (1994)` with an average rating of **4.4290** from **317** ratings.
+- The highest average-rated genre in the output is Film-Noir at **3.9201** across **870** ratings.
+
+These are results from the included MovieLens dataset and current generated output files, not guaranteed metrics for a different dataset or modified inputs.
+
+## Streamlit Dashboard
+
+The Streamlit app is [`dashboard/app.py`](dashboard/app.py). It reads:
+
+- The raw local `ml-latest-small/ratings.csv` and `ml-latest-small/movies.csv` for KPI cards.
+- CSV part files from `data/processed/summary/`, `top_users/`, `top_movies/`, `genre_stats/`, and `rating_distribution/`.
+
+The page provides total rating, movie, and user counts and the raw-data average rating; a genre average-rating bar chart; a rating distribution chart; a highest-rated movie table with a minimum-rating-count slider and title search; and a top-active-users chart. The top movie slider ranges from 50 to 300 ratings. The `summary` CSV is generated by the analytics job, while the dashboard's average-rating KPI is calculated from the raw ratings file.
+
+Install the declared dashboard dependencies and launch the app from the repository root:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+streamlit run dashboard/app.py
+```
+
+Streamlit normally serves the page at [http://localhost:8501](http://localhost:8501). Generate the processed outputs first to populate the charts and result table; the app reads raw data for the KPI cards.
+
+## HDFS Replication and Verification
+
+Use the following read-only commands to inspect the running cluster:
+
+```bash
+# Shows live DataNodes and HDFS storage/health summary.
+docker compose exec master hdfs dfsadmin -report
+
+# Shows the configured default replication factor (expected: 2).
+docker compose exec master hdfs getconf -confKey dfs.replication
+
+# Checks files, block locations, and filesystem integrity.
+docker compose exec master hdfs fsck / -files -blocks -locations
+
+# Shows the input and processed output paths.
+docker compose exec master hdfs dfs -ls -R /movielens
+```
+
+For a focused check of the ratings file's block locations, use:
+
+```bash
+docker compose exec master \
+  hdfs fsck /movielens/ratings.csv -files -blocks -locations
+```
+
+### Observed runtime verification
+
+During a read-only check of the running project on **November 16, 2026**, `hdfs dfsadmin -report` showed **two live DataNodes** and `dfs.replication` returned **2**. `hdfs fsck / -files -blocks -locations` reported `Status: HEALTHY`, seven validated blocks, average block replication 2.0, and zero missing, corrupt, under-replicated, or over-replicated blocks.
+
+That is a verified snapshot of the running environment, not a guarantee about a fresh installation. On a new cluster, upload the input files and run the analytics before expecting the same file and block counts. A missing DataNode or a file not yet uploaded will naturally produce different report totals.
+
+## Spark Cluster Verification
+
+Open the Spark Master UI at [http://localhost:8080](http://localhost:8080):
+
+- The **Workers** section shows registered workers, their state, cores, and memory.
+- The **Applications** section shows running and completed Spark applications.
+
+The worker UIs are available at [http://localhost:8081](http://localhost:8081) and [http://localhost:8082](http://localhost:8082). The host maps worker 2's container port 8081 to host port 8082.
+
+In the runtime check on **November 16, 2026**, the Spark Master UI reported two `ALIVE` workers, each with **1 core** and **768 MiB** of configured worker memory. It also showed the `MovieLensRatingAnalysis` application in `FINISHED` state. These are observed runtime results; a fresh cluster will show no completed application until a job is submitted.
+
+## Troubleshooting
+
+### A container is unhealthy or does not start
+
+Check Compose state and service logs:
+
+```bash
+docker compose ps -a
+docker compose logs --tail=200 master worker1 worker2
+```
+
+For the master's health-check history:
+
+```bash
+docker inspect --format '{{json .State.Health}}' master
+```
+
+The master check expects NameNode RPC at `master:9000`, Spark RPC at `master:7077`, and the local web UI ports 9870 and 8080, plus a successful `hdfs dfsadmin -report`. The entrypoint waits for the HDFS and Spark RPC endpoints before reporting startup complete. Check the first failing command in logs rather than repeatedly recreating containers.
+
+### NameNode startup or metadata errors
+
+Check the master log and effective HDFS addresses:
+
+```bash
+docker compose logs --tail=200 master
+docker compose exec master hdfs getconf -confKey fs.defaultFS
+docker compose exec master hdfs getconf -confKey dfs.namenode.rpc-address
+docker compose exec master hdfs dfsadmin -report
+```
+
+The configured RPC endpoint is `master:9000`. The startup script preserves existing NameNode metadata; it formats only a fresh empty volume and refuses to format a non-empty directory without valid `current/VERSION` metadata. Do not remove the named volumes or manually reformat the NameNode as a troubleshooting shortcut.
+
+### Workers are not registering
+
+```bash
+docker compose ps -a
+docker compose logs --tail=200 worker1 worker2
+docker compose exec master hdfs dfsadmin -report
+```
+
+Confirm that the master is healthy and that worker logs can reach `master:9000` and `master:7077`. Compose starts workers only after the master is healthy. Each worker then waits for both RPC ports and for its DataNode to register with HDFS before starting its Spark Worker.
+
+### HDFS connection errors
+
+Use the service name from inside Compose containers and the published localhost port from a host process:
+
+- From a Compose container: `hdfs://master:9000`.
+- From host-based local Spark mode: `hdfs://localhost:9000`.
+
+Confirm the master is healthy, check port 9000, and verify that `/movielens/ratings.csv` and `/movielens/movies.csv` exist with `hdfs dfs -ls /movielens`. The input directory is not populated automatically; upload the files using the HDFS instructions above.
+
+### Spark job fails or refuses to overwrite output
+
+Review the Spark Master UI and the output from `spark-submit`. Confirm that both input files exist in HDFS and that the Spark Workers are `ALIVE`. By default, the job fails rather than replacing existing output paths. To rerun intentionally and replace existing HDFS and local output directories, set `MOVIELENS_OVERWRITE=true` on the job submission.
+
+### Processed CSV files are missing
+
+Check whether the HDFS output directories exist:
+
+```bash
+docker compose exec master hdfs dfs -ls -R /movielens/processed
+```
+
+Cluster-mode synchronization is enabled by default. If it was disabled, set `MOVIELENS_SYNC_OUTPUTS=true` on the next cluster run. If the outputs already exist, also set `MOVIELENS_OVERWRITE=true` to allow the job to regenerate and synchronize them. Confirm the host has `data/processed/<output-name>/part-*.csv` before starting the dashboard.
+
+### Streamlit dependencies or paths fail
+
+Run Streamlit from the repository root in an activated virtual environment and install the dependencies from `requirements.txt`. Confirm `ml-latest-small/ratings.csv`, `ml-latest-small/movies.csv`, and the processed output directories exist at the paths used by the app. For local analytics mode, also account for the script's fixed `~/MovieLensProject/data/processed` output path.
+
+## Limitations and Future Enhancements
+
+The current project is a batch analytics demonstration over the MovieLens Latest Small dataset. The three Compose services run on one Docker host; they are not physical servers. The application does not implement Kafka ingestion, HBase storage, streaming analytics, recommendation-model training, or deployment to a cloud platform. Local Spark mode is single-machine `local[*]`, not a distributed cluster run.
+
+Possible future enhancements (not currently implemented) include:
+
+- Kafka-based event ingestion and streaming analytics.
+- HBase integration for serving or storing analytical data.
+- Additional Docker workers and resource/scale experiments.
+- Evaluations on larger MovieLens datasets.
+- Additional analyses or dashboard filters and visualizations.
+
+## Learning Outcomes
+
+This project demonstrates practical concepts in:
+
+- HDFS NameNode/DataNode roles, file storage, block replication, and filesystem health checks.
+- Distributed processing with Spark DataFrames and a standalone Master/Worker topology.
+- Submitting a PySpark job to a cluster and distinguishing it from local Spark execution.
+- Moving data between a local dataset, HDFS, Spark output directories, and a dashboard-facing CSV directory.
+- Container networking, health checks, persistent named volumes, resource limits, and service dependencies in Docker Compose.
+- Building visual summaries from distributed batch-processing outputs with Streamlit, Pandas, and Plotly.
